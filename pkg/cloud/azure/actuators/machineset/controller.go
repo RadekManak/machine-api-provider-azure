@@ -16,12 +16,16 @@ package machineset
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
+	"strings"
 
 	"github.com/go-logr/logr"
 	machinev1 "github.com/openshift/api/machine/v1beta1"
 	mapierrors "github.com/openshift/machine-api-operator/pkg/controller/machine"
+	"github.com/openshift/machine-api-provider-azure/pkg/cloud/azure"
 	"github.com/openshift/machine-api-provider-azure/pkg/cloud/azure/actuators"
+	"github.com/openshift/machine-api-provider-azure/pkg/cloud/azure/services/resourceskus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -46,8 +50,9 @@ type Reconciler struct {
 	Client client.Client
 	Log    logr.Logger
 
-	recorder record.EventRecorder
-	scheme   *runtime.Scheme
+	recorder     record.EventRecorder
+	scheme       *runtime.Scheme
+	resourceSkus azure.Service
 }
 
 // SetupWithManager creates a new controller for a manager.
@@ -120,30 +125,99 @@ func isInvalidConfigurationError(err error) bool {
 }
 
 func (r *Reconciler) reconcile(machineSet *machinev1.MachineSet) (ctrl.Result, error) {
-	providerConfig, err := getproviderConfig(machineSet)
+	klog.Infof("%v: Reconciling MachineSet", machineSet.Name)
+	sku, err := getSKU(r, machineSet)
 	if err != nil {
-		return ctrl.Result{}, mapierrors.InvalidMachineConfiguration("failed to get providerConfig: %v", err)
-	}
-	instanceType, ok := InstanceTypes[providerConfig.VMSize]
-	if !ok {
-		klog.Error("Unable to set scale from zero annotations: unknown instance type: %s", providerConfig.VMSize)
-		klog.Error("Autoscaling from zero will not work. To fix this, manually populate machine annotations for your instance type: %v", []string{cpuKey, memoryKey, gpuKey})
+		if strings.Contains(err.Error(), "not found in location") {
+			// Print different error message when there is no failure, but SKU is not available.
+			klog.Errorf("Unable to set scale from zero annotations: instance type unknown or unavailabe for this account or location: %v", err)
+		} else {
+			klog.Errorf("Unable to set scale from zero annotations: Azure list SKU request failed: %v", err)
+		}
 
 		// Returning no error to prevent further reconciliation, as user intervention is now required but emit an informational event
-		r.recorder.Eventf(machineSet, corev1.EventTypeWarning, "FailedUpdate", "Failed to set autoscaling from zero annotations, instance type unknown")
+		r.recorder.Eventf(machineSet, corev1.EventTypeWarning, "FailedUpdate", "Failed to set autoscaling from zero annotations, instance type unknown or unavailable")
+
 		return ctrl.Result{}, nil
 	}
 
+	updateMachineSetAnnotations(machineSet, sku)
+
+	return ctrl.Result{}, nil
+}
+
+func getSKU(r *Reconciler, machineSet *machinev1.MachineSet) (resourceskus.SKU, error) {
+	providerConfig, err := getproviderConfig(machineSet)
+	if err != nil {
+		return resourceskus.SKU{}, mapierrors.InvalidMachineConfiguration("failed to get providerConfig: %v", err)
+	}
+
+	params := actuators.MachineScopeParams{
+		Machine: &machinev1.Machine{
+			Spec: machineSet.Spec.Template.Spec,
+		},
+		CoreClient: r.Client,
+	}
+
+	machineScope, err := actuators.NewMachineScope(params)
+	if err != nil {
+		return resourceskus.SKU{}, err
+	}
+
+	if r.resourceSkus == nil {
+		r.resourceSkus = resourceskus.NewService(machineScope)
+	}
+
+	skuSpec := resourceskus.Spec{
+		Name:         providerConfig.VMSize,
+		ResourceType: resourceskus.VirtualMachines,
+	}
+	skuI, err := r.resourceSkus.Get(context.Background(), skuSpec)
+
+	if err != nil {
+		return resourceskus.SKU{}, fmt.Errorf("could not find sku: %s", providerConfig.VMSize)
+	}
+
+	sku := skuI.(resourceskus.SKU)
+
+	return sku, nil
+}
+
+func updateMachineSetAnnotations(machineSet *machinev1.MachineSet, sku resourceskus.SKU) error {
 	if machineSet.Annotations == nil {
 		machineSet.Annotations = make(map[string]string)
 	}
 
 	// TODO: get annotations keys from machine API
-	machineSet.Annotations[cpuKey] = strconv.FormatInt(instanceType.VCPU, 10)
-	machineSet.Annotations[memoryKey] = strconv.FormatInt(instanceType.MemoryMb, 10)
-	machineSet.Annotations[gpuKey] = strconv.FormatInt(instanceType.GPU, 10)
+	// CPU
+	cpuCap, ok := sku.GetCapability(resourceskus.VCPUs)
+	if !ok {
+		fmt.Printf("failed to get vCPUs from capabilities: %v", sku.Capabilities)
+	}
+	machineSet.Annotations[cpuKey] = cpuCap
 
-	return ctrl.Result{}, nil
+	// Memory
+	memoryCap, ok := sku.GetCapability(resourceskus.MemoryGB)
+	if !ok {
+		fmt.Printf("failed to get memoryGB from capabilities: %v", sku.Capabilities)
+	}
+	memoryCapFloatGB, err := strconv.ParseFloat(memoryCap, 64)
+	if err != nil {
+		fmt.Printf("failed to parse memoryGB: %v", err)
+	}
+	memoryCapFloatMB := memoryCapFloatGB * 1024
+	memoryCapIntMb := int64(math.Round(memoryCapFloatMB))
+	machineSet.Annotations[memoryKey] = strconv.FormatInt(memoryCapIntMb, 10)
+
+	// GPU
+	gpuCap, ok := sku.GetCapability(resourceskus.GPUs)
+	if !ok {
+		machineSet.Annotations[gpuKey] = "0"
+	} else {
+		machineSet.Annotations[gpuKey] = gpuCap
+	}
+
+	return nil
 }
 
 func getproviderConfig(machineSet *machinev1.MachineSet) (*machinev1.AzureMachineProviderSpec, error) {

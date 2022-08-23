@@ -10,11 +10,14 @@ require (
 	github.com/ghodss/yaml v1.0.0
 	github.com/go-logr/logr v1.2.2
 	github.com/golang/mock v1.6.0
+	github.com/google/go-cmp v0.5.6
+	github.com/hashicorp/golang-lru v0.5.1
 	github.com/mitchellh/mapstructure v1.4.2
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.17.0
 	github.com/openshift/api v0.0.0-20220325173635-8107b7a38e53
 	github.com/openshift/machine-api-operator v0.2.1-0.20220327131531-58ba8507d869
+	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v1.2.1
 	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
 
@@ -57,7 +60,6 @@ require (
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/google/btree v1.0.1 // indirect
-	github.com/google/go-cmp v0.5.6 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.3.0 // indirect
@@ -82,7 +84,6 @@ require (
 	github.com/openshift/client-go v0.0.0-20211209144617-7385dd6338e3 // indirect
 	github.com/openshift/library-go v0.0.0-20220121154930-b7889002d63e // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_golang v1.11.1 // indirect
 	github.com/prometheus/client_model v0.2.0 // indirect
