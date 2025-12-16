@@ -20,8 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2021-02-01/network"
+	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/to"
 	machinecontroller "github.com/openshift/machine-api-operator/pkg/controller/machine"
 	"github.com/openshift/machine-api-provider-azure/pkg/cloud/azure"
@@ -350,42 +352,78 @@ func (s *Service) CreateOrUpdate(ctx context.Context, spec azure.Spec) error {
 
 // ReconcileFailedNIC attempts to recover a NIC in Failed state by resubmitting
 // its current configuration to Azure. This preserves any backend pools added
-// by CCM that are not part of the Machine spec.
+// by CCM that are not part of the Machine spec. Uses etag for optimistic
+// concurrency to avoid overwriting concurrent changes from CCM.
 func (s *Service) ReconcileFailedNIC(ctx context.Context, name string) error {
-	// Get current NIC from Azure (includes CCM's backend pools)
-	existingNIC, err := s.get(ctx, name)
-	if err != nil {
-		return fmt.Errorf("failed to get network interface %s: %w", name, err)
+	return s.reconcileFailedNICWithRetry(ctx, name, 3) // max 3 retries
+}
+
+const maxReconcileRetries = 3
+
+func (s *Service) reconcileFailedNICWithRetry(ctx context.Context, name string, maxRetries int) error {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Get current NIC from Azure (includes etag and CCM's backend pools)
+		existingNIC, err := s.get(ctx, name)
+		if err != nil {
+			return fmt.Errorf("failed to get network interface %s: %w", name, err)
+		}
+
+		if attempt == 0 {
+			klog.V(2).Infof("attempting to reconcile failed network interface %s by resubmitting current configuration", name)
+		} else {
+			klog.V(2).Infof("retrying reconciliation of network interface %s (attempt %d/%d) after conflict", name, attempt+1, maxRetries+1)
+		}
+
+		// Resubmit the NIC unchanged - etag in the object provides optimistic locking
+		f, err := s.Client.CreateOrUpdate(ctx,
+			s.Scope.MachineConfig.ResourceGroup,
+			name,
+			*existingNIC)
+
+		if err != nil {
+			if isPreconditionFailedError(err) && attempt < maxRetries {
+				// Conflict detected - another controller modified the NIC
+				// Retry with fresh data
+				klog.V(4).Infof("conflict detected for network interface %s, will retry", name)
+				continue
+			}
+			return fmt.Errorf("failed to resubmit network interface %s: %w", name, err)
+		}
+
+		err = f.WaitForCompletionRef(ctx, s.Client.Client)
+		if err != nil {
+			if isPreconditionFailedError(err) && attempt < maxRetries {
+				klog.V(4).Infof("conflict detected during wait for network interface %s, will retry", name)
+				continue
+			}
+			return fmt.Errorf("failed waiting for network interface %s reconciliation: %w", name, err)
+		}
+
+		iface, err := f.Result(s.Client)
+		if err != nil {
+			return fmt.Errorf("failed to get result for network interface %s: %w", name, err)
+		}
+
+		// Check if reconciliation succeeded
+		if iface.ProvisioningState == network.ProvisioningStateFailed {
+			return fmt.Errorf("network interface %s still in failed state after reconciliation attempt", name)
+		}
+
+		klog.V(2).Infof("successfully reconciled failed network interface %s", name)
+		return nil
 	}
 
-	klog.V(2).Infof("attempting to reconcile failed network interface %s by resubmitting current configuration", name)
+	return fmt.Errorf("network interface %s reconciliation failed after %d attempts due to conflicts", name, maxRetries+1)
+}
 
-	// Resubmit the NIC unchanged (like ARO-RP script)
-	f, err := s.Client.CreateOrUpdate(ctx,
-		s.Scope.MachineConfig.ResourceGroup,
-		name,
-		*existingNIC)
-	if err != nil {
-		return fmt.Errorf("failed to resubmit network interface %s: %w", name, err)
+// isPreconditionFailedError checks if the error is a 412 Precondition Failed
+// which indicates an etag conflict (someone else modified the resource).
+func isPreconditionFailedError(err error) bool {
+	var detailedErr autorest.DetailedError
+	if errors.As(err, &detailedErr) {
+		return detailedErr.StatusCode == http.StatusPreconditionFailed
 	}
-
-	err = f.WaitForCompletionRef(ctx, s.Client.Client)
-	if err != nil {
-		return fmt.Errorf("failed waiting for network interface %s reconciliation: %w", name, err)
-	}
-
-	iface, err := f.Result(s.Client)
-	if err != nil {
-		return fmt.Errorf("failed to get result for network interface %s: %w", name, err)
-	}
-
-	// Check if reconciliation succeeded
-	if iface.ProvisioningState == network.ProvisioningStateFailed {
-		return fmt.Errorf("network interface %s still in failed state after reconciliation attempt", name)
-	}
-
-	klog.V(2).Infof("successfully reconciled failed network interface %s", name)
-	return nil
+	return false
 }
 
 // Delete deletes the network interface with the provided name.
