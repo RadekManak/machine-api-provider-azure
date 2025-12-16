@@ -139,7 +139,7 @@ func newFakeReconciler(t *testing.T) *Reconciler {
 
 	return &Reconciler{
 		scope:                     newFakeMachineScope(t, actuators.ControlPlane, string(configv1.AzurePublicCloud)),
-		networkInterfacesSvc:      networkInterfacesSvc,
+		networkInterfacesSvc:      &fakeNICMockServiceWrapper{networkInterfacesSvc},
 		virtualMachinesSvc:        fakeVMSuccessSvc,
 		virtualMachinesExtSvc:     fakeSuccessSvc,
 		disksSvc:                  fakeSuccessSvc,
@@ -163,7 +163,7 @@ func newFakeReconcilerWithScope(t *testing.T, scope *actuators.MachineScope) *Re
 	return &Reconciler{
 		scope:                 scope,
 		availabilityZonesSvc:  availabilityZonesSvc,
-		networkInterfacesSvc:  fakeSuccessSvc,
+		networkInterfacesSvc:  &fakeNICServiceWrapper{fakeSuccessSvc},
 		virtualMachinesSvc:    fakeVMSuccessSvc,
 		virtualMachinesExtSvc: fakeSuccessSvc,
 	}
@@ -248,6 +248,48 @@ func (s *FakeCountService) Delete(ctx context.Context, spec azure.Spec) error {
 	return nil
 }
 
+// GetID returns a fake ID.
+func (s *FakeCountService) GetID(ctx context.Context, name string) (string, error) {
+	return "fake-nic-id", nil
+}
+
+// ReconcileFailedNIC returns fake success.
+func (s *FakeCountService) ReconcileFailedNIC(ctx context.Context, name string) error {
+	return nil
+}
+
+// fakeNICServiceWrapper wraps an azure.Service and adds the missing methods
+// required by networkinterfaces.ServiceWithGetID interface.
+type fakeNICServiceWrapper struct {
+	azure.Service
+}
+
+// GetID returns a fake ID.
+func (s *fakeNICServiceWrapper) GetID(ctx context.Context, name string) (string, error) {
+	return "fake-nic-id", nil
+}
+
+// ReconcileFailedNIC returns fake success.
+func (s *fakeNICServiceWrapper) ReconcileFailedNIC(ctx context.Context, name string) error {
+	return nil
+}
+
+// fakeNICMockServiceWrapper wraps a mock service and adds the missing methods
+// required by networkinterfaces.ServiceWithGetID interface.
+type fakeNICMockServiceWrapper struct {
+	*mock_azure.MockService
+}
+
+// GetID returns a fake ID.
+func (s *fakeNICMockServiceWrapper) GetID(ctx context.Context, name string) (string, error) {
+	return "fake-nic-id", nil
+}
+
+// ReconcileFailedNIC returns fake success.
+func (s *fakeNICMockServiceWrapper) ReconcileFailedNIC(ctx context.Context, name string) error {
+	return nil
+}
+
 func TestReconcilerSuccess(t *testing.T) {
 	fakeReconciler := newFakeReconciler(t)
 
@@ -271,7 +313,7 @@ func TestReconcilerSuccess(t *testing.T) {
 func TestReconcileFailure(t *testing.T) {
 	fakeFailureSvc := &azure.FakeFailureService{}
 	fakeReconciler := newFakeReconciler(t)
-	fakeReconciler.networkInterfacesSvc = fakeFailureSvc
+	fakeReconciler.networkInterfacesSvc = &fakeNICServiceWrapper{fakeFailureSvc}
 	fakeReconciler.virtualMachinesSvc = fakeFailureSvc
 	fakeReconciler.virtualMachinesExtSvc = fakeFailureSvc
 
@@ -720,7 +762,7 @@ func TestMachineEvents(t *testing.T) {
 						scope:                 scope,
 						availabilityZonesSvc:  availabilityZonesSvc,
 						availabilitySetsSvc:   availabilitySetsSvc,
-						networkInterfacesSvc:  networkSvc,
+						networkInterfacesSvc:  &fakeNICMockServiceWrapper{networkSvc},
 						virtualMachinesSvc:    vmSvc,
 						virtualMachinesExtSvc: vmExtSvc,
 						publicIPSvc:           pipSvc,
@@ -838,7 +880,7 @@ func TestStatusCodeBasedCreationErrors(t *testing.T) {
 				ReconcilerBuilder: func(scope *actuators.MachineScope) *Reconciler {
 					return &Reconciler{
 						scope:                scope,
-						networkInterfacesSvc: networkSvc,
+						networkInterfacesSvc: &fakeNICMockServiceWrapper{networkSvc},
 						virtualMachinesSvc:   vmSvc,
 						availabilityZonesSvc: availabilityZonesSvc,
 					}
@@ -950,7 +992,7 @@ func TestInvalidConfigurationCreationErrors(t *testing.T) {
 				ReconcilerBuilder: func(scope *actuators.MachineScope) *Reconciler {
 					return &Reconciler{
 						scope:                scope,
-						networkInterfacesSvc: networkSvc,
+						networkInterfacesSvc: &fakeNICMockServiceWrapper{networkSvc},
 						virtualMachinesSvc:   vmSvc,
 					}
 				},

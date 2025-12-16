@@ -348,6 +348,46 @@ func (s *Service) CreateOrUpdate(ctx context.Context, spec azure.Spec) error {
 	return err
 }
 
+// ReconcileFailedNIC attempts to recover a NIC in Failed state by resubmitting
+// its current configuration to Azure. This preserves any backend pools added
+// by CCM that are not part of the Machine spec.
+func (s *Service) ReconcileFailedNIC(ctx context.Context, name string) error {
+	// Get current NIC from Azure (includes CCM's backend pools)
+	existingNIC, err := s.get(ctx, name)
+	if err != nil {
+		return fmt.Errorf("failed to get network interface %s: %w", name, err)
+	}
+
+	klog.V(2).Infof("attempting to reconcile failed network interface %s by resubmitting current configuration", name)
+
+	// Resubmit the NIC unchanged (like ARO-RP script)
+	f, err := s.Client.CreateOrUpdate(ctx,
+		s.Scope.MachineConfig.ResourceGroup,
+		name,
+		*existingNIC)
+	if err != nil {
+		return fmt.Errorf("failed to resubmit network interface %s: %w", name, err)
+	}
+
+	err = f.WaitForCompletionRef(ctx, s.Client.Client)
+	if err != nil {
+		return fmt.Errorf("failed waiting for network interface %s reconciliation: %w", name, err)
+	}
+
+	iface, err := f.Result(s.Client)
+	if err != nil {
+		return fmt.Errorf("failed to get result for network interface %s: %w", name, err)
+	}
+
+	// Check if reconciliation succeeded
+	if iface.ProvisioningState == network.ProvisioningStateFailed {
+		return fmt.Errorf("network interface %s still in failed state after reconciliation attempt", name)
+	}
+
+	klog.V(2).Infof("successfully reconciled failed network interface %s", name)
+	return nil
+}
+
 // Delete deletes the network interface with the provided name.
 func (s *Service) Delete(ctx context.Context, spec azure.Spec) error {
 	nicSpec, ok := spec.(*Spec)

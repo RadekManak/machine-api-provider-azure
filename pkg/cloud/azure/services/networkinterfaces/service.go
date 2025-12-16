@@ -47,6 +47,11 @@ type ServiceWithGetID interface {
 
 	// GetID returns the ID of the object with the given name
 	GetID(ctx context.Context, name string) (string, error)
+
+	// ReconcileFailedNIC attempts to recover a NIC in Failed state by resubmitting
+	// its current configuration to Azure. This preserves any backend pools added
+	// by CCM that are not part of the Machine spec.
+	ReconcileFailedNIC(ctx context.Context, name string) error
 }
 
 // getGroupsClient creates a new groups client from subscriptionid.

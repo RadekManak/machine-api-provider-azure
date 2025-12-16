@@ -726,7 +726,6 @@ func TestMachineUpdateWithProvisionsngFailedNic(t *testing.T) {
 				return newFakeMachineScope(t, "worker", string(configv1.AzurePublicCloud))
 			}
 			r := newFakeReconcilerWithScope(t, scope(t))
-			r.networkInterfacesSvc = networkSvc
 
 			nicName := azure.GenerateNetworkInterfaceName(r.scope.Machine.Name)
 			expectedVnet := r.scope.MachineConfig.Vnet
@@ -741,19 +740,16 @@ func TestMachineUpdateWithProvisionsngFailedNic(t *testing.T) {
 			}
 			networkSvc.EXPECT().Get(testCtx, &networkinterfaces.Spec{VnetName: expectedVnet, Name: nicName}).Return(fakeGetRetVal, nil).Times(1)
 
-			expectedSpec := &networkinterfaces.Spec{
-				Name:       nicName,
-				SubnetName: r.scope.MachineConfig.Subnet,
-				VnetName:   r.scope.MachineConfig.Vnet,
+			// Create a mock NIC service wrapper that allows controlling ReconcileFailedNIC behavior
+			nicServiceWrapper := &fakeNICMockServiceWrapperWithReconcileErr{
+				MockService:         networkSvc,
+				reconcileFailedErr:  tc.expectErr,
 			}
-
-			// Because the NIC's in a failed state, we expect to see an attempt to recreate it again.
-			// If it errors, then the whole `Update` function will error, and the Machine will be queue for reconciliation.
-			networkSvc.EXPECT().CreateOrUpdate(testCtx, expectedSpec).Return(tc.expectErr).Times(1)
+			r.networkInterfacesSvc = nicServiceWrapper
 
 			err := r.Update(testCtx)
 			if tc.expectErr != nil {
-				g.Expect(err.Error()).To(ContainSubstring("failed to provision"))
+				g.Expect(err.Error()).To(ContainSubstring("failed to reconcile"))
 			} else {
 				g.Expect(err).To(BeNil())
 			}
@@ -872,7 +868,7 @@ func TestStackHubDataDiskDeletion(t *testing.T) {
 				scope:                scope,
 				virtualMachinesSvc:   vmSvc,
 				disksSvc:             disksSvc,
-				networkInterfacesSvc: networkSvc,
+				networkInterfacesSvc: &fakeNICMockServiceWrapper{networkSvc},
 				availabilitySetsSvc:  availabilitySetsSvc,
 			}
 
@@ -918,3 +914,21 @@ func TestStackHubDataDiskDeletion(t *testing.T) {
 		})
 	}
 }
+
+// fakeNICMockServiceWrapperWithReconcileErr wraps a mock service and provides
+// control over the ReconcileFailedNIC return value for testing.
+type fakeNICMockServiceWrapperWithReconcileErr struct {
+	*mock_azure.MockService
+	reconcileFailedErr error
+}
+
+// GetID returns a fake ID.
+func (s *fakeNICMockServiceWrapperWithReconcileErr) GetID(ctx context.Context, name string) (string, error) {
+	return "fake-nic-id", nil
+}
+
+// ReconcileFailedNIC returns the configured error for testing.
+func (s *fakeNICMockServiceWrapperWithReconcileErr) ReconcileFailedNIC(ctx context.Context, name string) error {
+	return s.reconcileFailedErr
+}
+

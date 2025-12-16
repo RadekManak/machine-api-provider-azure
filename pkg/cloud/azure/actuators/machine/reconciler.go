@@ -81,7 +81,7 @@ type Reconciler struct {
 	scope                     *actuators.MachineScope
 	availabilityZonesSvc      azure.Service
 	interfaceLoadBalancersSvc azure.Service
-	networkInterfacesSvc      azure.Service
+	networkInterfacesSvc      networkinterfaces.ServiceWithGetID
 	publicIPSvc               azure.Service
 	virtualMachinesSvc        azure.Service
 	virtualMachinesExtSvc     azure.Service
@@ -219,11 +219,12 @@ func (s *Reconciler) Update(ctx context.Context) error {
 				continue
 			}
 
-			// If the NIC has a failed provision operation, attempt to update it. Requeue on failure.
+			// If the NIC has a failed provision operation, attempt to reconcile it by resubmitting
+			// the current configuration. This preserves any backend pools added by CCM.
 			if *niface.ProvisioningState == networkinterfaces.ProvisioningStateFailed {
-				klog.V(4).Infof("network interface %q in provisioning failed state, attempting to update", ifaceName)
-				if err := s.createOrUpdateNetworkInterface(ctx); err != nil {
-					return fmt.Errorf("network interface %s failed to provision", ifaceName)
+				klog.V(4).Infof("network interface %q in provisioning failed state, attempting to reconcile", ifaceName)
+				if err := s.networkInterfacesSvc.ReconcileFailedNIC(ctx, ifaceName); err != nil {
+					return fmt.Errorf("network interface %s failed to reconcile: %w", ifaceName, err)
 				}
 			}
 
